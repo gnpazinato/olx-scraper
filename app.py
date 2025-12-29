@@ -1,113 +1,101 @@
 import asyncio
 import streamlit as st
+import pandas as pd
 
 from scraper import buscar_anuncios_olx
 
+MAX_ANUNCIOS = 3000  # limite seguro fixo (você pediu)
+DEFAULT_PATH = "/celulares"  # Brasil todo
+
+
+def run_async(coro):
+    """
+    Evita erro de event loop em alguns ambientes.
+    """
+    try:
+        loop = asyncio.get_running_loop()
+        # se já existe loop rodando, cria outro
+        new_loop = asyncio.new_event_loop()
+        try:
+            return new_loop.run_until_complete(coro)
+        finally:
+            new_loop.close()
+    except RuntimeError:
+        return asyncio.run(coro)
+
+
 st.set_page_config(page_title="OLX Celulares Scraper", layout="wide")
 
-st.title("OLX – Celulares e Smartphones (Scraper)")
+st.title("OLX – Celulares e Smartphones (Brasil)")
+st.caption("Busca com filtros e retorna resultados em uma planilha visual (tabela).")
 
-with st.expander("Como funciona", expanded=False):
-    st.write(
-        "Você seleciona os filtros (iguais aos da OLX) e o app busca anúncios "
-        "paginando automaticamente. Por segurança, há um limite de 3.000 anúncios."
+with st.sidebar:
+    st.header("Filtros (como na OLX)")
+
+    # APP “zerado”: tudo começa vazio/sem seleção
+    termo = st.text_input("Termo de busca (q)", value="", placeholder="Ex: iphone 15 pro max")
+
+    col1, col2 = st.columns(2)
+    with col1:
+        preco_min = st.number_input("Preço mínimo (ps)", min_value=0, value=0, step=50)
+    with col2:
+        preco_max = st.number_input("Preço máximo (pe)", min_value=0, value=0, step=50)
+
+    st.divider()
+    st.subheader("Atalhos de categoria (path)")
+
+    # Você pode evoluir isso depois para refletir 100% os caminhos do PDF,
+    # mas aqui mantém Brasil todo e permite Apple/usado-excelente etc.
+    path = st.text_input(
+        "Path da OLX (categoria)",
+        value=DEFAULT_PATH,
+        help='Ex: /celulares/apple/usado-excelente (como no seu link)',
     )
 
-# -----------------------------
-# APP “ZERADO” (sem pré-seleções)
-# -----------------------------
-# Path base igual à categoria que você está usando.
-# Ex.: /celulares/apple/usado-excelente (marca + condição no path)
-st.subheader("Filtros")
+    st.divider()
+    st.subheader("Parâmetros extras (do seu link)")
 
-col1, col2, col3, col4 = st.columns(4)
+    # do seu exemplo:
+    # opst=2 (OLX Pay?) e elbh=1/2 (Entrega)
+    opst = st.multiselect("opst", options=[1, 2, 3, 4], default=[])
+    elbh = st.multiselect("elbh", options=[1, 2, 3], default=[])
 
-with col1:
-    termo = st.text_input("Termo de busca (q)", value="")
+    st.caption("Dica: mantenha o resultado <= 3.000 anúncios para evitar bloqueio e lentidão.")
 
-with col2:
-    preco_min = st.number_input("Preço mínimo (ps)", min_value=0, value=0, step=50)
+    buscar = st.button("Buscar anúncios", type="primary")
 
-with col3:
-    preco_max = st.number_input("Preço máximo (pe)", min_value=0, value=0, step=50)
-
-with col4:
-    ordenar = st.selectbox(
-        "Ordenar por (opst)",
-        options=[
-            (None, "Padrão / Mais relevantes"),
-            (2, "Mais recentes"),
-            (3, "Menor preço"),
-            (4, "Maior preço"),
-        ],
-        format_func=lambda x: x[1],
-        index=0,
-    )[0]
-
-st.markdown("---")
-
-# Anúncios com (do seu print): Garantia da OLX / Garantia + Entrega (elbh=1/2)
-colA, colB, colC = st.columns(3)
-
-with colA:
-    garantia_olx = st.checkbox("Garantia da OLX (elbh=1)", value=False)
-
-with colB:
-    garantia_entrega = st.checkbox("Garantia + Entrega (elbh=2)", value=False)
-
-with colC:
-    st.caption("Dica: esses dois filtros aumentam a qualidade do resultado.")
-
-# Por enquanto, mantendo o PATH fixo igual ao seu caso do print/link.
-# Depois você pode transformar Marca/Condição em selects e montar o path dinamicamente.
-path = "/celulares/apple/usado-excelente"
-
-# Limite “seguro”
-MAX_ANUNCIOS = 3000
-
-buscar = st.button("Buscar anúncios", type="primary")
+st.write("")
 
 if buscar:
-    # validação simples
-    if preco_max and preco_min and preco_max < preco_min:
-        st.error("Preço máximo (pe) não pode ser menor que o preço mínimo (ps).")
-        st.stop()
-
     params = {}
 
     if termo.strip():
         params["q"] = termo.strip()
 
-    if preco_min > 0:
+    # só aplica preço se preenchido
+    if preco_min and preco_min > 0:
         params["ps"] = int(preco_min)
-
-    if preco_max > 0:
+    if preco_max and preco_max > 0:
         params["pe"] = int(preco_max)
 
-    if ordenar is not None:
-        params["opst"] = ordenar
-
-    elbh = []
-    if garantia_olx:
-        elbh.append(1)
-    if garantia_entrega:
-        elbh.append(2)
+    if opst:
+        params["opst"] = opst
     if elbh:
-        params["elbh"] = elbh  # vira elbh=1&elbh=2
+        params["elbh"] = elbh
 
-    st.info(f"Buscando anúncios (até {MAX_ANUNCIOS})… Isso pode demorar.")
+    st.info(f"Coletando anúncios (limite de segurança: {MAX_ANUNCIOS}). Pode demorar um pouco.")
 
-    with st.spinner("Coletando links e abrindo anúncios para extrair detalhes…"):
-        df = asyncio.run(
+    with st.spinner("Buscando e abrindo anúncios para extrair descrição…"):
+        df = run_async(
             buscar_anuncios_olx(
-                path=path,
+                path=path.strip() if path.strip() else DEFAULT_PATH,
                 params=params,
                 max_anuncios=MAX_ANUNCIOS,
-                concorrencia=6,
             )
         )
 
-    st.success(f"Pronto! Encontrei {len(df)} anúncios.")
-
-    # Visual (sem CSV)
-    st.dataframe(df, use_container_width=True, hide_index=True)
+    if df is None or df.empty:
+        st.warning("Nenhum anúncio encontrado (ou a OLX não carregou listagens). Tente ajustar filtros.")
+    else:
+        st.success(f"Anúncios coletados: {len(df)}")
+        st.dataframe(df, use_container_width=True, hide_index=True)
