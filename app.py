@@ -1,131 +1,113 @@
-import streamlit as st
-import pandas as pd
 import asyncio
+import streamlit as st
 
-from scraper import buscar_olx_com_filtros
+from scraper import buscar_anuncios_olx
 
-LIMITE_ANUNCIOS = 3000
+st.set_page_config(page_title="OLX Celulares Scraper", layout="wide")
 
+st.title("OLX – Celulares e Smartphones (Scraper)")
 
-def run_async(coro):
-    """
-    Executa coroutine de forma compatível com ambientes que já têm event loop (ex: Streamlit Cloud).
-    """
-    try:
-        loop = asyncio.get_event_loop()
-        if loop.is_running():
-            # cria um loop separado quando já existe um rodando
-            new_loop = asyncio.new_event_loop()
-            try:
-                return new_loop.run_until_complete(coro)
-            finally:
-                new_loop.close()
-        return loop.run_until_complete(coro)
-    except RuntimeError:
-        # sem loop definido
-        new_loop = asyncio.new_event_loop()
-        try:
-            asyncio.set_event_loop(new_loop)
-            return new_loop.run_until_complete(coro)
-        finally:
-            new_loop.close()
-
-
-st.set_page_config(page_title="OLX - Celulares (Planilha)", layout="wide")
-st.title("OLX Celulares e Smartphones — Planilha")
-
-with st.sidebar:
-    st.header("Filtros (igual OLX)")
-
-    anuncios_com = st.multiselect(
-        "Anúncios com",
-        ["Garantia da OLX", "Garantia + Entrega"],
-        default=[],
+with st.expander("Como funciona", expanded=False):
+    st.write(
+        "Você seleciona os filtros (iguais aos da OLX) e o app busca anúncios "
+        "paginando automaticamente. Por segurança, há um limite de 3.000 anúncios."
     )
 
-    termo = st.text_input("Buscar por termo", value="")
+# -----------------------------
+# APP “ZERADO” (sem pré-seleções)
+# -----------------------------
+# Path base igual à categoria que você está usando.
+# Ex.: /celulares/apple/usado-excelente (marca + condição no path)
+st.subheader("Filtros")
 
-    marca = st.selectbox("Marca", ["(selecione)", "APPLE"], index=0)
-    modelo = st.selectbox("Modelo", ["Todos os modelos"], index=0)
+col1, col2, col3, col4 = st.columns(4)
 
-    st.subheader("Condição")
-    condicoes = []
-    if st.checkbox("Novo", value=False):
-        condicoes.append("Novo")
-    if st.checkbox("Usado - Excelente", value=False):
-        condicoes.append("Usado - Excelente")
-    if st.checkbox("Usado - Bom", value=False):
-        condicoes.append("Usado - Bom")
-    if st.checkbox("Recondicionado", value=False):
-        condicoes.append("Recondicionado")
-    if st.checkbox("Com defeito", value=False):
-        condicoes.append("Com defeito")
+with col1:
+    termo = st.text_input("Termo de busca (q)", value="")
 
-    st.subheader("Saúde da bateria")
-    baterias = []
-    if st.checkbox("Perfeita (95% até 100%)", value=False):
-        baterias.append("Perfeita")
-    if st.checkbox("Boa (80% até 94%)", value=False):
-        baterias.append("Boa")
-    if st.checkbox("OK (60% até 79%)", value=False):
-        baterias.append("OK")
-    if st.checkbox("Ruim (40% até 59%)", value=False):
-        baterias.append("Ruim")
-    if st.checkbox("Muito Ruim (abaixo de 39%)", value=False):
-        baterias.append("Muito Ruim")
+with col2:
+    preco_min = st.number_input("Preço mínimo (ps)", min_value=0, value=0, step=50)
 
-    st.subheader("Preço")
-    preco_min = st.number_input("Preço mínimo", min_value=0, value=0, step=50)
-    preco_max = st.number_input("Preço máximo", min_value=0, value=0, step=50)
+with col3:
+    preco_max = st.number_input("Preço máximo (pe)", min_value=0, value=0, step=50)
 
-    st.caption(f"Limite de segurança: até {LIMITE_ANUNCIOS} anúncios por busca.")
+with col4:
+    ordenar = st.selectbox(
+        "Ordenar por (opst)",
+        options=[
+            (None, "Padrão / Mais relevantes"),
+            (2, "Mais recentes"),
+            (3, "Menor preço"),
+            (4, "Maior preço"),
+        ],
+        format_func=lambda x: x[1],
+        index=0,
+    )[0]
 
+st.markdown("---")
 
-if st.button("Buscar", type="primary"):
-    if (
-        marca == "(selecione)"
-        and termo.strip() == ""
-        and preco_min == 0
-        and preco_max == 0
-        and not anuncios_com
-        and not condicoes
-        and not baterias
-    ):
-        st.warning("Selecione ao menos um filtro (ou termo) para buscar.")
-    else:
-        with st.spinner("Aplicando filtros na OLX e coletando anúncios..."):
-            df, info = run_async(
-                buscar_olx_com_filtros(
-                    termo=termo.strip(),
-                    anuncios_com=anuncios_com,
-                    marca=None if marca == "(selecione)" else marca,
-                    modelo=modelo,
-                    condicoes=condicoes,
-                    baterias=baterias,
-                    preco_min=int(preco_min) if preco_min else None,
-                    preco_max=int(preco_max) if preco_max else None,
-                    headless=True,  # fixo
-                    limite_anuncios=LIMITE_ANUNCIOS,
-                )
+# Anúncios com (do seu print): Garantia da OLX / Garantia + Entrega (elbh=1/2)
+colA, colB, colC = st.columns(3)
+
+with colA:
+    garantia_olx = st.checkbox("Garantia da OLX (elbh=1)", value=False)
+
+with colB:
+    garantia_entrega = st.checkbox("Garantia + Entrega (elbh=2)", value=False)
+
+with colC:
+    st.caption("Dica: esses dois filtros aumentam a qualidade do resultado.")
+
+# Por enquanto, mantendo o PATH fixo igual ao seu caso do print/link.
+# Depois você pode transformar Marca/Condição em selects e montar o path dinamicamente.
+path = "/celulares/apple/usado-excelente"
+
+# Limite “seguro”
+MAX_ANUNCIOS = 3000
+
+buscar = st.button("Buscar anúncios", type="primary")
+
+if buscar:
+    # validação simples
+    if preco_max and preco_min and preco_max < preco_min:
+        st.error("Preço máximo (pe) não pode ser menor que o preço mínimo (ps).")
+        st.stop()
+
+    params = {}
+
+    if termo.strip():
+        params["q"] = termo.strip()
+
+    if preco_min > 0:
+        params["ps"] = int(preco_min)
+
+    if preco_max > 0:
+        params["pe"] = int(preco_max)
+
+    if ordenar is not None:
+        params["opst"] = ordenar
+
+    elbh = []
+    if garantia_olx:
+        elbh.append(1)
+    if garantia_entrega:
+        elbh.append(2)
+    if elbh:
+        params["elbh"] = elbh  # vira elbh=1&elbh=2
+
+    st.info(f"Buscando anúncios (até {MAX_ANUNCIOS})… Isso pode demorar.")
+
+    with st.spinner("Coletando links e abrindo anúncios para extrair detalhes…"):
+        df = asyncio.run(
+            buscar_anuncios_olx(
+                path=path,
+                params=params,
+                max_anuncios=MAX_ANUNCIOS,
+                concorrencia=6,
             )
-
-        if info.get("atingiu_limite"):
-            st.warning(
-                f"A busca atingiu o limite de segurança ({info['limite']} anúncios). "
-                "Refine os filtros na OLX (até ~3.000) e tente novamente."
-            )
-
-        st.success(f"Coletados: {len(df)} anúncios")
-        st.dataframe(
-            df,
-            use_container_width=True,
-            hide_index=True,
-            column_config={
-                "Link": st.column_config.LinkColumn("Link", display_text="Abrir"),
-                "PreçoNum": st.column_config.NumberColumn("PreçoNum"),
-                "Título": st.column_config.TextColumn("Título", width="large"),
-                "Descrição": st.column_config.TextColumn("Descrição", width="large"),
-            },
         )
-else:
-    st.info("Selecione filtros na barra lateral e clique em **Buscar**.")
+
+    st.success(f"Pronto! Encontrei {len(df)} anúncios.")
+
+    # Visual (sem CSV)
+    st.dataframe(df, use_container_width=True, hide_index=True)
