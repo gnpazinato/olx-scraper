@@ -1,3 +1,5 @@
+chromium
+chromium-common
 libnss3
 libnspr4
 libatk1.0-0
