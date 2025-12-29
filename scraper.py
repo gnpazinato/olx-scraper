@@ -1,193 +1,149 @@
 import asyncio
-import re
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urljoin
 
 import pandas as pd
 from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeoutError
 
 
-OLX_BASE = "https://www.olx.com.br"
+DEFAULT_UA = (
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+)
 
 
-def build_search_url(path: str, params: dict) -> str:
+def build_olx_url(path: str, params: dict) -> str:
     """
     path exemplo: "/celulares/apple/usado-excelente"
-    params exemplo: {"ps": 2000, "pe": 4500, "q": "iphone 15 pro max", "opst": 2, "elbh": [1,2], "o": 1}
+    params exemplo: {"q":"iphone 15 pro max", "ps":2000, "pe":4500, "opst":[2], "elbh":[1,2]}
     """
-    # remove None/"" e mantém listas (ex.: elbh=[1,2])
+    base = "https://www.olx.com.br"
+    if not path.startswith("/"):
+        path = "/" + path
+
+    # remove None/"" e permite listas (doseq)
     clean = {}
     for k, v in params.items():
         if v is None:
             continue
-        if isinstance(v, str) and not v.strip():
+        if isinstance(v, str) and v.strip() == "":
             continue
         clean[k] = v
 
     qs = urlencode(clean, doseq=True)
-    return f"{OLX_BASE}{path}?{qs}" if qs else f"{OLX_BASE}{path}"
-
-
-async def _extract_links_from_results_page(page) -> list[str]:
-    """
-    Extrai links de anúncios da página de resultados.
-    Heurística: URLs terminando com um ID numérico grande (ex.: ...-1464735998).
-    """
-    hrefs = await page.eval_on_selector_all(
-        "a[href]",
-        "els => els.map(e => e.href).filter(Boolean)"
-    )
-
-    ad_links = []
-    pattern = re.compile(r"^https://[a-z]{2}\.olx\.com\.br/.+-\d{7,}$")
-    for h in hrefs:
-        if pattern.match(h):
-            ad_links.append(h)
-
-    # remove duplicados preservando ordem
-    seen = set()
-    unique = []
-    for h in ad_links:
-        if h not in seen:
-            seen.add(h)
-            unique.append(h)
-    return unique
-
-
-async def _extract_ad_details(context, url: str, sem: asyncio.Semaphore) -> dict:
-    """
-    Abre o anúncio e extrai:
-    - Título
-    - Preço
-    - Localização (texto)
-    - Descrição
-    """
-    async with sem:
-        p = await context.new_page()
-        try:
-            await p.goto(url, wait_until="domcontentloaded", timeout=60000)
-
-            # Título (na página do anúncio aparece como texto grande, normalmente h1)
-            title = ""
-            h1 = await p.query_selector("h1")
-            if h1:
-                title = (await h1.inner_text()).strip()
-
-            # Preço (muitas vezes aparece como "R$ X.XXX" em um bloco destacado)
-            # Pegamos o primeiro texto que pareça preço.
-            body_text = await p.text_content("body")
-            price = ""
-            if body_text:
-                m = re.search(r"R\$\s?[\d\.\u00A0]+", body_text)
-                if m:
-                    price = m.group(0).replace("\u00A0", " ").strip()
-
-            # Descrição: em alguns layouts existe data-testid, mas vamos usar fallback
-            desc = ""
-            desc_el = await p.query_selector('[data-testid="ad-description"]')
-            if desc_el:
-                desc = (await desc_el.inner_text()).strip()
-            else:
-                # fallback: tenta pegar o primeiro parágrafo grande depois do título
-                # (heurística simples para não ficar vazio)
-                ps = await p.query_selector_all("p")
-                if ps:
-                    cand = []
-                    for el in ps[:8]:
-                        t = (await el.inner_text()).strip()
-                        if len(t) >= 40:
-                            cand.append(t)
-                    desc = cand[0] if cand else ""
-
-            desc = desc.replace("\n", " ").strip()
-
-            # Localização: aparece como texto próximo do bloco "Localização"
-            location = ""
-            if body_text:
-                # pega uma janela de texto ao redor da palavra "Localização"
-                idx = body_text.find("Localização")
-                if idx != -1:
-                    snippet = body_text[idx: idx + 250]
-                    location = " ".join(snippet.split()).replace("Localização", "").strip()
-
-            return {
-                "Título": title or "",
-                "Preço": price or "",
-                "Localização": location or "",
-                "Descrição": desc or "",
-                "Link": url,
-            }
-
-        except PlaywrightTimeoutError:
-            return {"Título": "", "Preço": "", "Localização": "", "Descrição": "", "Link": url}
-        except Exception:
-            return {"Título": "", "Preço": "", "Localização": "", "Descrição": "", "Link": url}
-        finally:
-            await p.close()
+    return urljoin(base, path) + (("?" + qs) if qs else "")
 
 
 async def buscar_anuncios_olx(
-    *,
     path: str,
     params: dict,
     max_anuncios: int = 3000,
-    concorrencia: int = 6,
-    pausa_entre_paginas_s: float = 0.8,
+    delay_s: float = 0.8,
 ) -> pd.DataFrame:
     """
-    - path: caminho da categoria (ex.: "/celulares/apple/usado-excelente")
-    - params: dict de querystring (ex.: {"ps": 2000, "pe": 4500, "q": "iphone 15 pro max", "elbh":[1,2], "opst":2})
-    - max_anuncios: limite de segurança
+    - Abre a busca, pagina (o=1..n) e coleta links/títulos/preços.
+    - Depois entra em cada anúncio para extrair descrição.
+    - max_anuncios = limite de segurança (você pediu 3.000).
     """
+
+    resultados = []
+    vistos = set()
+
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(headless=True)
         context = await browser.new_context(
             locale="pt-BR",
-            user_agent=(
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/120.0.0.0 Safari/537.36"
-            ),
-            viewport={"width": 1366, "height": 768},
+            user_agent=DEFAULT_UA,
+            viewport={"width": 1365, "height": 768},
         )
         page = await context.new_page()
 
-        links = []
+        # paginação via "o="
         pagina = 1
+        while True:
+            params_paginados = dict(params)
+            params_paginados["o"] = pagina
 
-        try:
-            while len(links) < max_anuncios:
-                params_pagina = dict(params)
-                params_pagina["o"] = pagina  # paginação (o=1, o=2, ...)
-                url = build_search_url(path, params_pagina)
+            url = build_olx_url(path, params_paginados)
+            await page.goto(url, wait_until="domcontentloaded")
 
-                await page.goto(url, wait_until="domcontentloaded", timeout=60000)
+            # Tenta esperar algum item aparecer
+            try:
+                await page.wait_for_selector('section[data-testid="listing-item-wrapper"]', timeout=8000)
+            except PlaywrightTimeoutError:
+                # Pode ser bloqueio/antibot ou busca sem resultados
+                html = (await page.content()).lower()
+                if "robô" in html or "verificação" in html or "captcha" in html:
+                    # sinaliza no DF para você enxergar na UI
+                    await browser.close()
+                    return pd.DataFrame([{
+                        "Título": "BLOQUEIO/VERIFICAÇÃO DA OLX",
+                        "Preço": "",
+                        "Link": url,
+                        "Descrição": "A OLX pode ter bloqueado a automação. Tente reduzir filtros/volume e rodar de novo."
+                    }])
+                break
 
-                novos = await _extract_links_from_results_page(page)
-                # se não achou nada novo, para
-                before = len(links)
-                for u in novos:
-                    if u not in links:
-                        links.append(u)
-                        if len(links) >= max_anuncios:
-                            break
+            cards = await page.query_selector_all('section[data-testid="listing-item-wrapper"]')
+            if not cards:
+                break
 
-                if len(links) == before:
+            # Coleta preliminar
+            coletados_essa_pagina = 0
+            for el in cards:
+                link_el = await el.query_selector('a[data-testid="item-direct-link"]')
+                titulo_el = await el.query_selector("h2")
+                preco_el = await el.query_selector('span[aria-label^="Preço"]')
+
+                if not link_el:
+                    continue
+
+                link = await link_el.get_attribute("href")
+                if not link:
+                    continue
+
+                # link pode vir relativo
+                if link.startswith("/"):
+                    link = "https://www.olx.com.br" + link
+
+                if link in vistos:
+                    continue
+
+                titulo = (await titulo_el.inner_text()) if titulo_el else ""
+                preco = (await preco_el.inner_text()) if preco_el else ""
+
+                vistos.add(link)
+                resultados.append({"Título": titulo.strip(), "Preço": preco.strip(), "Link": link})
+                coletados_essa_pagina += 1
+
+                if len(resultados) >= max_anuncios:
                     break
 
-                pagina += 1
-                await asyncio.sleep(pausa_entre_paginas_s)
+            # Se não coletou nada novo nesta página, para
+            if coletados_essa_pagina == 0:
+                break
 
-            # agora coleta detalhes (concorrência controlada)
-            sem = asyncio.Semaphore(concorrencia)
-            tasks = [_extract_ad_details(context, u, sem) for u in links]
-            rows = await asyncio.gather(*tasks)
+            if len(resultados) >= max_anuncios:
+                break
 
-            df = pd.DataFrame(rows)
+            pagina += 1
+            await asyncio.sleep(0.4)
 
-            # limpa duplicados e linhas vazias demais
-            df = df.drop_duplicates(subset=["Link"])
-            return df
+        # Agora entra em cada anúncio e pega descrição
+        finais = []
+        for i, item in enumerate(resultados, start=1):
+            if i > max_anuncios:
+                break
+            try:
+                await page.goto(item["Link"], wait_until="domcontentloaded")
+                # descrição (padrão comum)
+                desc_el = await page.query_selector('span[data-testid="ad-description"]')
+                descricao = await desc_el.inner_text() if desc_el else ""
+                item["Descrição"] = " ".join(descricao.split())
+                finais.append(item)
+                await asyncio.sleep(delay_s)
+            except Exception:
+                # não mata a coleta
+                continue
 
-        finally:
-            await context.close()
-            await browser.close()
+        await browser.close()
+        return pd.DataFrame(finais)
