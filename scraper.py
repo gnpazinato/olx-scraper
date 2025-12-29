@@ -3,7 +3,7 @@ import pandas as pd
 from playwright.async_api import async_playwright
 
 OLX_BASE = "https://www.olx.com.br/celulares"
-
+SYSTEM_CHROMIUM = "/usr/bin/chromium"  # chromium instalado via packages.txt
 
 def _preco_num(preco_txt: str):
     if not preco_txt:
@@ -25,13 +25,12 @@ async def buscar_olx_com_filtros(
     limite_anuncios: int = 3000,
 ):
     """
-    Retorna (df, info).
+    Retorna (df, info)
     info = {"atingiu_limite": bool, "limite": int}
 
-    Nota: esta versão ainda não aplica filtros via clique.
-    Próxima etapa: aplicar filtros 1:1 como no app da OLX + paginação real.
+    Obs: ainda está na versão simples (1ª página). Depois a gente faz paginação + clique 1:1.
     """
-    # URL simples (ainda)
+
     params = []
     if termo:
         params.append(f"q={termo}")
@@ -40,21 +39,27 @@ async def buscar_olx_com_filtros(
     if preco_max is not None and preco_max > 0:
         params.append(f"pe={preco_max}")
 
-    url = OLX_BASE
-    if params:
-        url += "?" + "&".join(params)
+    url = OLX_BASE + ("?" + "&".join(params) if params else "")
 
     resultados = []
     atingiu_limite = False
 
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=headless)
+        browser = await p.chromium.launch(
+            headless=True,  # sempre headless no Streamlit Cloud
+            executable_path=SYSTEM_CHROMIUM,
+            args=[
+                "--no-sandbox",
+                "--disable-dev-shm-usage",
+                "--disable-gpu",
+            ],
+        )
+
         context = await browser.new_context(locale="pt-BR")
         page = await context.new_page()
 
         await page.goto(url, wait_until="domcontentloaded", timeout=60_000)
 
-        # Por enquanto: coleta apenas 1ª página (como seu app atual já vinha fazendo)
         cards = await page.query_selector_all('section[data-testid="listing-item-wrapper"]')
 
         for el in cards:
@@ -82,7 +87,7 @@ async def buscar_olx_com_filtros(
                     "Preço": preco_txt,
                     "PreçoNum": _preco_num(preco_txt),
                     "Link": link,
-                    "Descrição": "",  # ainda não entra no anúncio (próxima etapa)
+                    "Descrição": "",
                 }
             )
 
