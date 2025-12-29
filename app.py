@@ -1,11 +1,39 @@
 import streamlit as st
+import pandas as pd
 import asyncio
+
 from scraper import buscar_olx_com_filtros
+
+LIMITE_ANUNCIOS = 3000
+
+
+def run_async(coro):
+    """
+    Executa coroutine de forma compatível com ambientes que já têm event loop (ex: Streamlit Cloud).
+    """
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            # cria um loop separado quando já existe um rodando
+            new_loop = asyncio.new_event_loop()
+            try:
+                return new_loop.run_until_complete(coro)
+            finally:
+                new_loop.close()
+        return loop.run_until_complete(coro)
+    except RuntimeError:
+        # sem loop definido
+        new_loop = asyncio.new_event_loop()
+        try:
+            asyncio.set_event_loop(new_loop)
+            return new_loop.run_until_complete(coro)
+        finally:
+            new_loop.close()
+
 
 st.set_page_config(page_title="OLX - Celulares (Planilha)", layout="wide")
 st.title("OLX Celulares e Smartphones — Planilha")
 
-# App sempre "zerado": nada pré-selecionado
 with st.sidebar:
     st.header("Filtros (igual OLX)")
 
@@ -17,7 +45,6 @@ with st.sidebar:
 
     termo = st.text_input("Buscar por termo", value="")
 
-    # (por enquanto deixo só APPLE como exemplo; depois a gente puxa dinamicamente)
     marca = st.selectbox("Marca", ["(selecione)", "APPLE"], index=0)
     modelo = st.selectbox("Modelo", ["Todos os modelos"], index=0)
 
@@ -51,10 +78,10 @@ with st.sidebar:
     preco_min = st.number_input("Preço mínimo", min_value=0, value=0, step=50)
     preco_max = st.number_input("Preço máximo", min_value=0, value=0, step=50)
 
-    st.caption("O app busca até 3.000 anúncios por pesquisa (limite de segurança).")
+    st.caption(f"Limite de segurança: até {LIMITE_ANUNCIOS} anúncios por busca.")
+
 
 if st.button("Buscar", type="primary"):
-    # validação leve: pelo menos algo deve estar setado
     if (
         marca == "(selecione)"
         and termo.strip() == ""
@@ -67,7 +94,7 @@ if st.button("Buscar", type="primary"):
         st.warning("Selecione ao menos um filtro (ou termo) para buscar.")
     else:
         with st.spinner("Aplicando filtros na OLX e coletando anúncios..."):
-            df, info = asyncio.run(
+            df, info = run_async(
                 buscar_olx_com_filtros(
                     termo=termo.strip(),
                     anuncios_com=anuncios_com,
@@ -77,15 +104,15 @@ if st.button("Buscar", type="primary"):
                     baterias=baterias,
                     preco_min=int(preco_min) if preco_min else None,
                     preco_max=int(preco_max) if preco_max else None,
-                    headless=True,            # fixo (sem UI)
-                    limite_anuncios=3000,     # fixo (sem UI)
+                    headless=True,  # fixo
+                    limite_anuncios=LIMITE_ANUNCIOS,
                 )
             )
 
         if info.get("atingiu_limite"):
             st.warning(
-                f"A busca atingiu o limite de segurança de {info['limite']} anúncios. "
-                "Refine os filtros na OLX para reduzir o total (ex.: ≤ 3.000) e tente novamente."
+                f"A busca atingiu o limite de segurança ({info['limite']} anúncios). "
+                "Refine os filtros na OLX (até ~3.000) e tente novamente."
             )
 
         st.success(f"Coletados: {len(df)} anúncios")
@@ -100,6 +127,5 @@ if st.button("Buscar", type="primary"):
                 "Descrição": st.column_config.TextColumn("Descrição", width="large"),
             },
         )
-
 else:
     st.info("Selecione filtros na barra lateral e clique em **Buscar**.")
